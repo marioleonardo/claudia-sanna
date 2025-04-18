@@ -61,35 +61,52 @@ def take_screenshots_of_pdf(pdf_path: str, output_folder: str, dpi: int = 150) -
         print(f"Error taking screenshots from {pdf_path}: {e}")
         return []
 
-def prepare_gemini_input(prompt: str, text: str = None, image_paths: list = None) -> list:
+def prepare_gemini_input(prompt: str, text: str = None, image_paths: list = None, pdf_path: str = None) -> list:
     """Prepares the input list for the Gemini API."""
-    content_parts = [prompt] # Start with the main prompt
-
+    content_parts = []
+    
+    # Add the prompt as the first part
+    content_parts.append(types.Part.from_text(text=prompt))
+    
+    if pdf_path:
+        try:
+            with open(pdf_path, 'rb') as f:
+                pdf_bytes = f.read()
+            content_parts.append(types.Part.from_bytes(
+                data=pdf_bytes,
+                mime_type='application/pdf'
+            ))
+            print(f"Added PDF file: {pdf_path}")
+        except Exception as e:
+            print(f"Warning: Could not load or add PDF file {pdf_path}: {e}")
+    
     if text:
-        content_parts.append("\n\n--- PDF Text Content ---\n")
-        content_parts.append(text)
+        content_parts.append(types.Part.from_text(text="\n\n--- PDF Text Content ---\n"))
+        content_parts.append(types.Part.from_text(text=text))
 
     if image_paths:
-        content_parts.append("\n\n--- PDF Page Images ---\n")
+        content_parts.append(types.Part.from_text(text="\n\n--- PDF Page Images ---\n"))
         print(f"Loading {len(image_paths)} images for Gemini...")
         for img_path in image_paths:
             try:
-                img = Image.open(img_path)
-                # Optional: Resize large images to avoid hitting size limits,
-                # but be mindful of losing detail needed for OCR/analysis.
-                # max_size = (1024, 1024)
-                # img.thumbnail(max_size, Image.Resampling.LANCZOS)
-
-                # Convert image to bytes if needed or pass PIL object directly
-                # Depending on the specific API version/library behavior
-                # Passing PIL object is generally preferred with google-generativeai
-                content_parts.append(img)
+                with open(img_path, 'rb') as f:
+                    img_bytes = f.read()
+                content_parts.append(types.Part.from_bytes(
+                    data=img_bytes,
+                    mime_type='image/png'
+                ))
                 print(f"Added image: {img_path}")
             except Exception as e:
                 print(f"Warning: Could not load or add image {img_path}: {e}")
         print("Image loading complete.")
 
-    return content_parts
+    # Create a single content with all parts
+    content = types.Content(
+        role='user',
+        parts=content_parts
+    )
+    
+    return [content]
 
 def send_to_gemini(content_parts: list) -> str:
     """Sends the prepared content to the Gemini API and returns the response."""
@@ -99,7 +116,7 @@ def send_to_gemini(content_parts: list) -> str:
             model=MODEL_NAME,
             contents=content_parts,
             config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_budget=1024)
+                thinking_config=types.ThinkingConfig(thinking_budget=4024)
             )
         )
         end_time = time.time()
@@ -137,9 +154,9 @@ if __name__ == "__main__":
     parser.add_argument("pdf_file", help="Path to the input PDF file.")
     parser.add_argument(
         "--mode",
-        choices=["text", "screenshots", "both"],
+        choices=["text", "screenshots", "both", "direct"],
         required=True,
-        help="Data source to send to Gemini: 'text', 'screenshots', or 'both'."
+        help="Data source to send to Gemini: 'text', 'screenshots', 'both', or 'direct' (send PDF directly)."
     )
     parser.add_argument(
         "--dpi",
@@ -189,7 +206,7 @@ if __name__ == "__main__":
             print("Warning: No screenshots could be generated.")
 
     # --- Check if any data was generated ---
-    if not extracted_text and not screenshot_paths:
+    if not extracted_text and not screenshot_paths and args.mode != "direct":
         print("Error: No text extracted and no screenshots generated. Cannot proceed.")
         exit(1)
 
@@ -208,7 +225,7 @@ Analyze the provided content (text excerpts and/or page images from a PDF docume
 
 Follow these instructions carefully:
 
-1.  **Identify Chemical Substances:** Find all mentions of specific chemical compounds, ingredients, or substances. Filter out not relevant one, for example try to find in the introduction of the report the substances that the specific report is focusing on, usually they are specified in the introduction as a list of substances.
+1.  **Identify Chemical Substances:** Find chemical compounds, ingredients, or substances. Filter out not relevant one, for example try to find in the introduction of the report the substances that the specific report is focusing on, usually they are specified in the introduction as a list of substances. IMPORTANT: Do not include any substances that are not mentioned in the introduction of the report.
 2.  **Recognize Synonyms & Abbreviations:** Understand that the same substance might be referred to by different names (e.g., Sodium Chloride, NaCl, salt, saline solution) or abbreviations (e.g., H2O2 for Hydrogen Peroxide, EtOH for Ethanol). Group these under a primary or common standardized name where possible. If an abbreviation's meaning isn't explicitly defined but is clear from context (common chemical abbreviations), include it.
 3.  **Extract Concentration/Range:** For each identified substance, search the text and any visible tables in the images for concentration information. Look for percentages (e.g., 5%, 0.1% w/w, 1-10% v/v), ranges (e.g., "between 0.5% and 2%", "up to 15%"), or descriptive terms (e.g., "trace amount", "major component"). Report the found range or value precisely as stated. If no concentration is found for a substance, state "Not specified".
 4.  **Determine Use Case/Function:** Based on the context where the substance is mentioned, determine its described purpose or application. Examples include: 'active ingredient', 'preservative', 'emulsifier', 'solvent', 'pH adjuster', 'fragrance component', 'thickener', 'rinse-off product context', 'leave-on formulation context', 'catalyst', 'reactant', etc. If the context is unclear or no specific function is mentioned, state "Not specified". Look for mentions in formulation tables, experimental descriptions, or introductory/concluding remarks about components.
@@ -233,7 +250,12 @@ Example Table Row:
 Now, analyze the provided PDF content and generate the table. Output ONLY the table, with no additional text, explanations, or whitespace before or after the table.
 """
 
-    content_parts = prepare_gemini_input(gemini_prompt, extracted_text, screenshot_paths)
+    content_parts = prepare_gemini_input(
+        gemini_prompt, 
+        extracted_text if args.mode != "direct" else None, 
+        screenshot_paths if args.mode != "direct" else None,
+        str(pdf_path) if args.mode == "direct" else None
+    )
     gemini_response = send_to_gemini(content_parts)
 
     # Clean the response to ensure it's only a table
